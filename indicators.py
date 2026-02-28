@@ -57,6 +57,21 @@ def calc_bollinger(close: pd.Series, period=20, num_std=2):
     return upper, mid, lower
 
 
+def calc_atr(high: pd.Series, low: pd.Series, close: pd.Series,
+             period: int = 14) -> pd.Series:
+    """
+    Average True Range — 衡量价格波动幅度。
+    用于计算基于波动率的止盈止损区间。
+    """
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr.rolling(window=period, min_periods=period).mean()
+
+
 def calc_chip_distribution(
     close: pd.Series,
     high: pd.Series,

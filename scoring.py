@@ -12,7 +12,7 @@ import pandas as pd
 from config import SCORE_WEIGHTS
 from indicators import (
     calc_ma, calc_macd, calc_rsi, calc_kdj, calc_bollinger,
-    calc_chip_distribution,
+    calc_chip_distribution, calc_atr,
 )
 
 
@@ -224,3 +224,74 @@ def score_stock(df: pd.DataFrame) -> dict | None:
     result = {dim: raw[dim] for dim in SCORE_WEIGHTS if dim in raw}
     result["总分"] = round(weighted_total, 1)
     return result
+
+
+def calc_exit_points(df: pd.DataFrame) -> dict | None:
+    """
+    综合 ATR、支撑阻力位、布林带 三种方法预测止盈止损点。
+
+    止损逻辑：取 ATR 止损、近期支撑、布林下轨 中的最高值（最保守）
+    止盈逻辑：分两档
+      T1（短线）：ATR 1.5 倍目标 与 布林中轨 的较高者
+      T2（波段）：ATR 3.0 倍目标 与 布林上轨 / 近期阻力 的较高者
+
+    Returns dict: 止损价, 止盈1, 止盈2, 止损幅度%, 止盈1幅度%, 止盈2幅度%
+    """
+    if df is None or len(df) < 20:
+        return None
+
+    close = df["收盘"].astype(float)
+    high = df["最高"].astype(float)
+    low = df["最低"].astype(float)
+    price = close.iloc[-1]
+
+    if price <= 0:
+        return None
+
+    # --- ATR ---
+    atr = calc_atr(high, low, close, 14)
+    atr_val = atr.iloc[-1]
+    if np.isnan(atr_val) or atr_val <= 0:
+        atr_val = price * 0.03
+
+    # --- 支撑与阻力 ---
+    lookback = min(20, len(df))
+    recent_low = low.iloc[-lookback:].min()
+    recent_high = high.iloc[-lookback:].max()
+
+    # --- 布林带 ---
+    upper, mid, lower = calc_bollinger(close, 20, 2)
+    boll_upper = upper.iloc[-1] if not np.isnan(upper.iloc[-1]) else price * 1.06
+    boll_mid = mid.iloc[-1] if not np.isnan(mid.iloc[-1]) else price * 1.03
+    boll_lower = lower.iloc[-1] if not np.isnan(lower.iloc[-1]) else price * 0.94
+
+    # --- 止损：取三种方法中最保守的（最高值，离现价最近） ---
+    sl_atr = price - 2.0 * atr_val
+    sl_support = recent_low * 0.99
+    sl_boll = boll_lower
+
+    stop_loss = round(max(sl_atr, sl_support, sl_boll), 2)
+    # 止损不能高于现价
+    if stop_loss >= price:
+        stop_loss = round(price * 0.95, 2)
+
+    # --- 止盈 T1（短线目标）---
+    tp1_atr = price + 1.5 * atr_val
+    tp1 = round(max(tp1_atr, boll_mid), 2)
+    if tp1 <= price:
+        tp1 = round(price * 1.03, 2)
+
+    # --- 止盈 T2（波段目标）---
+    tp2_atr = price + 3.0 * atr_val
+    tp2 = round(max(tp2_atr, boll_upper, recent_high), 2)
+    if tp2 <= tp1:
+        tp2 = round(tp1 * 1.03, 2)
+
+    return {
+        "止损价": stop_loss,
+        "止盈1": tp1,
+        "止盈2": tp2,
+        "止损%": round((stop_loss / price - 1) * 100, 1),
+        "止盈1%": round((tp1 / price - 1) * 100, 1),
+        "止盈2%": round((tp2 / price - 1) * 100, 1),
+    }
