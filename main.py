@@ -111,6 +111,25 @@ def print_results(result_df):
                   f"止盈②: {r['止盈2']:.2f}({r['止盈2%']:+.1f}%)")
 
 
+def _build_signal_text(row) -> str:
+    """为单行数据生成信号摘要文本。"""
+    tag_rules = [
+        ("均线趋势", 8, "均线多头", 5, "均线偏多"),
+        ("MACD", 8, "MACD金叉", 5, "MACD偏多"),
+        ("成交量", 8, "量价配合", 5, "温和放量"),
+        ("KDJ", 6, "KDJ金叉", None, None),
+        ("动量", 7, "涨势良好", None, None),
+        ("筹码分布", 7, "上方筹码稀疏", 4, "筹码尚可"),
+    ]
+    tags = []
+    for col, th_hi, lbl_hi, th_lo, lbl_lo in tag_rules:
+        if col in row and row[col] >= th_hi:
+            tags.append(lbl_hi)
+        elif th_lo is not None and col in row and row[col] >= th_lo:
+            tags.append(lbl_lo)
+    return " | ".join(tags) if tags else ""
+
+
 def save_csv(result_df):
     import os
     os.makedirs("output", exist_ok=True)
@@ -118,7 +137,28 @@ def save_csv(result_df):
         "output",
         f"stock_picks_{datetime.date.today().strftime('%Y%m%d')}.csv",
     )
-    result_df.head(TOP_N).to_csv(fname, index=False, encoding="utf-8-sig")
+
+    out = result_df.head(TOP_N).copy()
+    out.insert(0, "排名", range(1, len(out) + 1))
+
+    out["止损%"] = out["止损%"].apply(lambda x: f"{x:+.1f}%")
+    out["止盈1%"] = out["止盈1%"].apply(lambda x: f"{x:+.1f}%")
+    out["止盈2%"] = out["止盈2%"].apply(lambda x: f"{x:+.1f}%")
+
+    out["信号摘要"] = out.apply(_build_signal_text, axis=1)
+
+    dim_cols = ["均线趋势", "MACD", "成交量", "筹码分布", "动量",
+                "布林带", "RSI", "KDJ", "换手率"]
+
+    col_order = [
+        "排名", "代码", "名称", "总分", "最新价", "涨跌幅%",
+        "止损价", "止损%", "止盈1", "止盈1%", "止盈2", "止盈2%",
+        "信号摘要",
+    ] + dim_cols
+
+    out = out[[c for c in col_order if c in out.columns]]
+
+    out.to_csv(fname, index=False, encoding="utf-8-sig")
     print(f"\n💾 结果已保存到: {fname}")
 
 
