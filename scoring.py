@@ -2,17 +2,18 @@
 """
 股票多维度评分模块
 
-每个维度原始分 0~10，通过 SCORE_WEIGHTS 加权后总分满分 100。
-新增维度只需在 config.SCORE_WEIGHTS 中添加 key 并调整权重。
+第一轮：9 维度加权评分（满分 100），选出 Top-10。
+第二轮：5 维度精选评分（满分 50），从 Top-10 中选出 Top-3。
 """
 
 import numpy as np
 import pandas as pd
 
-from config import SCORE_WEIGHTS
+from config import SCORE_WEIGHTS, ROUND2_WEIGHTS
 from indicators import (
     calc_ma, calc_macd, calc_rsi, calc_kdj, calc_bollinger,
     calc_chip_distribution, calc_atr,
+    calc_trend_stability, calc_bias, calc_volume_trend,
 )
 
 
@@ -295,3 +296,154 @@ def calc_exit_points(df: pd.DataFrame) -> dict | None:
         "止盈1%": round((tp1 / price - 1) * 100, 1),
         "止盈2%": round((tp2 / price - 1) * 100, 1),
     }
+
+
+# ===================================================================
+#  二次精选评分（从 Top-10 → Top-3）
+# ===================================================================
+
+def score_stock_round2(df: pd.DataFrame, exit_points: dict | None) -> dict | None:
+    """
+    五维度精选评分，每维 0~10，加权满分 50。
+    需要传入已计算好的 exit_points（止盈止损字典）。
+    """
+    if df is None or len(df) < 60:
+        return None
+
+    close = df["收盘"].astype(float)
+    high = df["最高"].astype(float)
+    low = df["最低"].astype(float)
+    volume = df["成交量"].astype(float)
+
+    raw: dict[str, float] = {}
+
+    # ---- 1. 风险收益比 (0~10) ----
+    s = 5.0
+    if exit_points:
+        tp_pct = abs(exit_points.get("止盈1%", 0))
+        sl_pct = abs(exit_points.get("止损%", 0))
+        if sl_pct > 0:
+            ratio = tp_pct / sl_pct
+            if ratio >= 3.0:
+                s = 10
+            elif ratio >= 2.5:
+                s = 8
+            elif ratio >= 2.0:
+                s = 6
+            elif ratio >= 1.5:
+                s = 4
+            elif ratio >= 1.0:
+                s = 2
+            else:
+                s = 0
+    raw["风险收益比"] = s
+
+    # ---- 2. 趋势稳定性 (0~10) ----
+    s = 0.0
+    ts = calc_trend_stability(close, 20)
+    if ts is not None:
+        r2 = ts["r_squared"]
+        up = ts["slope"] > 0
+        if up and r2 >= 0.80:
+            s = 10
+        elif up and r2 >= 0.60:
+            s = 8
+        elif up and r2 >= 0.40:
+            s = 6
+        elif up and r2 >= 0.20:
+            s = 4
+        elif up:
+            s = 2
+        elif r2 >= 0.60:
+            s = 1
+
+        higher_lows = sum(
+            1 for i in range(-1, -min(10, len(low)), -1)
+            if low.iloc[i] > low.iloc[i - 2]
+        )
+        s += min(higher_lows * 0.5, 2)
+
+    raw["趋势稳定性"] = max(min(s, 10), 0)
+
+    # ---- 3. 乖离率 BIAS (0~10) ----
+    s = 0.0
+    bias = calc_bias(close, 20)
+    if bias is not None:
+        if 0 <= bias <= 3:
+            s = 10
+        elif 3 < bias <= 5:
+            s = 7
+        elif 5 < bias <= 8:
+            s = 4
+        elif bias > 8:
+            s = 1
+        elif -2 <= bias < 0:
+            s = 5
+        elif -5 <= bias < -2:
+            s = 3
+        else:
+            s = 1
+    raw["乖离率"] = s
+
+    # ---- 4. 量能持续性 (0~10) ----
+    s = 0.0
+    vt = calc_volume_trend(volume, 5)
+    if vt is not None:
+        above = vt["above_ma_days"]
+        vol_up = vt["vol_slope"] > 0
+        if above >= 4 and vol_up:
+            s = 10
+        elif above >= 3 and vol_up:
+            s = 8
+        elif above >= 3:
+            s = 6
+        elif above >= 2 and vol_up:
+            s = 5
+        elif above >= 2:
+            s = 3
+        else:
+            s = 1
+    raw["量能持续性"] = max(min(s, 10), 0)
+
+    # ---- 5. 多周期共振 (0~10) ----
+    s = 0.0
+    ma5 = calc_ma(close, 5)
+    ma10 = calc_ma(close, 10)
+    ma20 = calc_ma(close, 20)
+    ma60 = calc_ma(close, 60)
+
+    price = close.iloc[-1]
+    daily_up = price > ma5.iloc[-1] > ma10.iloc[-1]
+    weekly_up = (
+        not np.isnan(ma60.iloc[-1])
+        and price > ma20.iloc[-1] > ma60.iloc[-1]
+    )
+    ma20_rising = ma20.iloc[-1] > ma20.iloc[-4] if len(ma20) > 4 else False
+    ma60_rising = (
+        not np.isnan(ma60.iloc[-4])
+        and ma60.iloc[-1] > ma60.iloc[-4]
+    ) if len(ma60) > 4 else False
+
+    if daily_up and weekly_up:
+        s = 7
+    elif daily_up:
+        s = 4
+    elif weekly_up:
+        s = 3
+    if ma20_rising:
+        s += 1.5
+    if ma60_rising:
+        s += 1.5
+
+    raw["多周期共振"] = max(min(s, 10), 0)
+
+    # ---- 加权总分 (满分 50) ----
+    weighted = sum(
+        raw[dim] / 10 * ROUND2_WEIGHTS[dim]
+        for dim in ROUND2_WEIGHTS
+        if dim in raw
+    )
+
+    result = {f"R2_{dim}": raw[dim] for dim in ROUND2_WEIGHTS if dim in raw}
+    result["精选分"] = round(weighted, 1)
+    return result

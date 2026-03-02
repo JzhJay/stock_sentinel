@@ -30,6 +30,19 @@ SCORE_WEIGHTS = {
 }
 assert sum(SCORE_WEIGHTS.values()) == 100, "SCORE_WEIGHTS 总和必须为 100"
 
+# ---------- 二次精选权重（总和必须 = 50） ----------
+# 从 Top-10 中精选 Top-3 的补充维度，每个维度原始分 0~10
+ROUND2_WEIGHTS = {
+    "风险收益比":  12,    # 止盈空间 / 止损空间，衡量入场性价比
+    "趋势稳定性":  10,    # R² 线性回归拟合度，越平滑趋势越可靠
+    "乖离率":       9,    # 偏离 MA20 程度，过高有回调风险
+    "量能持续性":  10,    # 近 5 日放量持续性，优于脉冲式放量
+    "多周期共振":   9,    # 日线 + 周线级别趋势方向一致
+}
+assert sum(ROUND2_WEIGHTS.values()) == 50, "ROUND2_WEIGHTS 总和必须为 50"
+
+FINAL_TOP = 3   # 二次精选最终推荐数量
+
 # 新浪 hq.sinajs.cn 每批请求的股票数量
 SINA_BATCH_SIZE = 800
 
