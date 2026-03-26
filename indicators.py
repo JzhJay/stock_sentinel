@@ -3,6 +3,7 @@
 
 import numpy as np
 import pandas as pd
+from numpy.polynomial.polynomial import polyfit
 
 
 def calc_ma(series: pd.Series, period: int) -> pd.Series:
@@ -55,6 +56,21 @@ def calc_bollinger(close: pd.Series, period=20, num_std=2):
     upper = mid + num_std * std
     lower = mid - num_std * std
     return upper, mid, lower
+
+
+def calc_atr(high: pd.Series, low: pd.Series, close: pd.Series,
+             period: int = 14) -> pd.Series:
+    """
+    Average True Range — 衡量价格波动幅度。
+    用于计算基于波动率的止盈止损区间。
+    """
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr.rolling(window=period, min_periods=period).mean()
 
 
 def calc_chip_distribution(
@@ -143,3 +159,54 @@ def calc_chip_distribution(
         "profit_ratio": profit_ratio,
         "concentration_90": concentration_90,
     }
+
+
+# ---------------------------------------------------------------------------
+#  二次精选辅助指标
+# ---------------------------------------------------------------------------
+
+def calc_trend_stability(close: pd.Series, period: int = 20) -> dict | None:
+    """
+    趋势稳定性：用最近 *period* 日收盘价做线性回归，
+    返回 R²（拟合度）和 slope（斜率方向）。
+    R² 越高说明走势越平滑、趋势越清晰。
+    """
+    if len(close) < period:
+        return None
+    y = close.iloc[-period:].values.astype(float)
+    x = np.arange(period, dtype=float)
+    coeffs = polyfit(x, y, deg=1)      # coeffs[0]=截距, coeffs[1]=斜率
+    slope = coeffs[1]
+    y_pred = coeffs[0] + coeffs[1] * x
+    ss_res = np.sum((y - y_pred) ** 2)
+    ss_tot = np.sum((y - y.mean()) ** 2)
+    r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+    return {"r_squared": max(r_squared, 0), "slope": slope}
+
+
+def calc_bias(close: pd.Series, period: int = 20) -> float | None:
+    """乖离率 = (收盘价 − MA) / MA × 100%"""
+    ma = calc_ma(close, period)
+    ma_val = ma.iloc[-1]
+    if np.isnan(ma_val) or ma_val <= 0:
+        return None
+    return (close.iloc[-1] - ma_val) / ma_val * 100
+
+
+def calc_volume_trend(volume: pd.Series, period: int = 5) -> dict | None:
+    """
+    量能持续性：统计最近 *period* 日成交量高于 MA5 的天数，
+    以及量能线性回归斜率（正 = 持续放量）。
+    """
+    if len(volume) < period + 5:
+        return None
+    vol = volume.astype(float)
+    ma5 = calc_ma(vol, 5)
+    recent_vol = vol.iloc[-period:].values
+    recent_ma = ma5.iloc[-period:].values
+    above_count = int(np.sum(recent_vol > recent_ma))
+
+    x = np.arange(period, dtype=float)
+    coeffs = polyfit(x, recent_vol, deg=1)
+    slope = coeffs[1]
+    return {"above_ma_days": above_count, "vol_slope": slope}

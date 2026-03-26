@@ -82,26 +82,40 @@ def get_all_stocks() -> pd.DataFrame | None:
     """
     print("📊 正在获取 A 股股票列表...")
 
-    # --- baostock 获取股票列表 ---
-    today = datetime.date.today().strftime("%Y-%m-%d")
-    rs = bs.query_all_stock(day=today)
-    if rs.error_code != "0" or rs.cur_row_num == 0:
-        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-        rs = bs.query_all_stock(day=yesterday)
-
+    # --- baostock 获取股票列表（向前回退最多 7 天寻找最近交易日） ---
     stock_list: list[dict] = []
-    while rs.error_code == "0" and rs.next():
-        row = rs.get_row_data()
-        code, trade_status, name = row[0], row[1], row[2]
-        pure = _bs_to_pure(code)
-        if trade_status != "1":
+    for offset in range(8):
+        day = (datetime.date.today() - datetime.timedelta(days=offset)).strftime("%Y-%m-%d")
+        try:
+            rs = bs.query_all_stock(day=day)
+        except Exception as e:
+            print(f"   query_all_stock({day}) 异常: {e}")
             continue
-        # 只保留沪深主板 + 创业板，排除科创板 (688) 和北交所 (8/4)
-        if pure.startswith(("6", "0", "3")) and not pure.startswith("688"):
-            stock_list.append({"bs_code": code, "代码": pure, "名称": name})
 
-    print(f"   获取到 {len(stock_list)} 只 A 股（已排除科创板/北交所）")
+        if rs.error_code != "0":
+            continue
+
+        candidates: list[dict] = []
+        while rs.next():
+            try:
+                row = rs.get_row_data()
+            except (UnicodeDecodeError, Exception):
+                continue
+            code, trade_status, name = row[0], row[1], row[2]
+            pure = _bs_to_pure(code)
+            if trade_status != "1":
+                continue
+            if pure.startswith(("6", "0", "3")) and not pure.startswith("688"):
+                candidates.append({"bs_code": code, "代码": pure, "名称": name})
+
+        if candidates:
+            stock_list = candidates
+            print(f"   使用交易日 {day}，获取到 {len(stock_list)} 只 A 股（已排除科创板/北交所）")
+            break
+        print(f"   {day} 无数据，继续回退...")
+
     if not stock_list:
+        print("   ❌ 回退 7 天仍无法获取股票列表")
         return None
 
     # --- 新浪 hq.sinajs.cn 批量获取实时行情 ---
