@@ -2,18 +2,30 @@
 """
 股票多维度评分模块
 
-第一轮：9 维度加权评分（满分 100），选出 Top-10。
+第一轮：10 维度加权评分（无硬门槛淘汰，满分 100），选出 Top-10。
 第二轮：5 维度精选评分（满分 50），从 Top-10 中选出 Top-3。
 """
 
 import numpy as np
 import pandas as pd
 
-from config import SCORE_WEIGHTS, ROUND2_WEIGHTS
+from config import (
+    SCORE_WEIGHTS, ROUND2_WEIGHTS,
+    MA_TREND_LOOKBACK, HARD_MAX_ABOVE_CHIP,
+    HARD_MIN_REL_POS, HARD_MAX_REL_POS,
+    HARD_REQUIRE_MA60_RISING, HARD_MIN_RISING_MA_COUNT,
+    HARD_MIN_SPREAD_WIDEN_COUNT, HARD_MA_EPS,
+    EXIT_ATR_MULT_STRONG, EXIT_ATR_MULT_BASE, EXIT_ATR_MULT_WEAK,
+    EXIT_TREND_R2_STRONG, EXIT_TREND_R2_WEAK,
+    EXIT_MIN_STOP_PCT, EXIT_MAX_STOP_PCT,
+    EXIT_TP1_ATR_MULT, EXIT_TP2_ATR_MULT,
+    EXIT_RR_TP1_WEIGHT, EXIT_RR_TP2_WEIGHT,
+    EXIT_TRAIL_BUFFER_ATR, EXIT_TRAIL_ATR_MULT,
+)
 from indicators import (
     calc_ma, calc_macd, calc_rsi, calc_kdj, calc_bollinger,
     calc_chip_distribution, calc_atr,
-    calc_trend_stability, calc_bias, calc_volume_trend,
+    calc_trend_stability, calc_bias, calc_volume_trend, calc_relative_position,
 )
 
 
@@ -37,21 +49,94 @@ def score_stock(df: pd.DataFrame) -> dict | None:
     ma20 = calc_ma(close, 20)
     ma60 = calc_ma(close, 60)
 
+    # ---- 偏好条件计算（用于加分，不做硬淘汰） ----
+    lb = max(1, int(MA_TREND_LOOKBACK))
+    if latest - lb < 0:
+        return None
+
+    ma_vals = [ma5.iloc[latest], ma10.iloc[latest], ma20.iloc[latest], ma60.iloc[latest]]
+    if any(np.isnan(v) for v in ma_vals):
+        return None
+
+    price = close.iloc[latest]
+    ma_bull = (price > ma5.iloc[latest] > ma10.iloc[latest] > ma20.iloc[latest] > ma60.iloc[latest])
+    eps = float(HARD_MA_EPS)
+    rising_5 = ma5.iloc[latest] > ma5.iloc[latest - lb] + eps
+    rising_10 = ma10.iloc[latest] > ma10.iloc[latest - lb] + eps
+    rising_20 = ma20.iloc[latest] > ma20.iloc[latest - lb] + eps
+    rising_60 = ma60.iloc[latest] > ma60.iloc[latest - lb] + eps
+    rising_count = int(rising_5) + int(rising_10) + int(rising_20) + int(rising_60)
+
+    # 默认要求短中期三条均线上行；MA60 是否强制由配置控制
+    if HARD_REQUIRE_MA60_RISING:
+        ma_rising = (
+            rising_5 and rising_10 and rising_20 and rising_60
+            and rising_count >= int(HARD_MIN_RISING_MA_COUNT)
+        )
+    else:
+        ma_rising = (
+            rising_5 and rising_10 and rising_20
+            and rising_count >= int(HARD_MIN_RISING_MA_COUNT)
+        )
+
+    spread_now = [
+        ma5.iloc[latest] - ma10.iloc[latest],
+        ma10.iloc[latest] - ma20.iloc[latest],
+        ma20.iloc[latest] - ma60.iloc[latest],
+    ]
+    spread_old = [
+        ma5.iloc[latest - lb] - ma10.iloc[latest - lb],
+        ma10.iloc[latest - lb] - ma20.iloc[latest - lb],
+        ma20.iloc[latest - lb] - ma60.iloc[latest - lb],
+    ]
+    spread_pos = all(s > 0 for s in spread_now)
+    spread_widen_count = sum(1 for n, o in zip(spread_now, spread_old) if n > o + eps)
+    spread_non_shrink_count = sum(1 for n, o in zip(spread_now, spread_old) if n >= o - eps)
+    min_widen = max(0, int(HARD_MIN_SPREAD_WIDEN_COUNT))
+    ma_diverging = spread_pos and (
+        spread_widen_count >= min_widen
+        or spread_non_shrink_count == 3
+    )
+
+    chip = calc_chip_distribution(close, high, low, volume, period=60)
+    if chip is None:
+        chip = {"above_ratio": 1.0, "profit_ratio": 0.0, "concentration_90": 1.0}
+    above_ratio = chip["above_ratio"]
+
+    rel_pos = calc_relative_position(close, period=120)
+    if rel_pos is None:
+        rel_pos = 0.5
+
     s = 0.0
-    if close.iloc[latest] > ma5.iloc[latest]:
+    if price > ma5.iloc[latest]:
         s += 1
-    if close.iloc[latest] > ma10.iloc[latest]:
+    if price > ma10.iloc[latest]:
         s += 1
-    if close.iloc[latest] > ma20.iloc[latest]:
+    if price > ma20.iloc[latest]:
         s += 1.5
-    if not np.isnan(ma60.iloc[latest]) and close.iloc[latest] > ma60.iloc[latest]:
+    if price > ma60.iloc[latest]:
         s += 1.5
     if ma5.iloc[latest] > ma5.iloc[latest - 3]:
         s += 1
     if ma10.iloc[latest] > ma10.iloc[latest - 3]:
         s += 1
+    if ma20.iloc[latest] > ma20.iloc[latest - 3]:
+        s += 0.5
+    if ma60.iloc[latest] > ma60.iloc[latest - 3]:
+        s += 0.5
     if ma5.iloc[latest] > ma10.iloc[latest] > ma20.iloc[latest]:
         s += 3
+    if ma20.iloc[latest] > ma60.iloc[latest]:
+        s += 0.5
+
+    widen_bonus = min(spread_widen_count * 0.5, 1.5)
+    s += widen_bonus
+    if ma_bull:
+        s += 0.5
+    if ma_rising:
+        s += 0.5
+    if ma_diverging:
+        s += 0.5
 
     raw["均线趋势"] = max(min(s, 10), 0)
 
@@ -181,39 +266,57 @@ def score_stock(df: pd.DataFrame) -> dict | None:
     raw["换手率"] = max(min(s, 10), 0)
 
     # ---- 9. 筹码分布 (原始分 0~10) ----
-    chip = calc_chip_distribution(close, high, low, volume, period=60)
     s = 0.0
-    if chip is not None:
-        above = chip["above_ratio"]
-        profit = chip["profit_ratio"]
-        conc = chip["concentration_90"]
+    above = chip["above_ratio"]
+    profit = chip["profit_ratio"]
+    conc = chip["concentration_90"]
 
-        if above < 0.15:
-            s += 4
-        elif above < 0.30:
-            s += 3
-        elif above < 0.50:
-            s += 1
-        elif above > 0.70:
-            s -= 1
+    if above < 0.15:
+        s += 4
+    elif above < 0.30:
+        s += 3
+    elif above < 0.50:
+        s += 1
+    elif above > 0.70:
+        s -= 1
 
-        if 0.60 <= profit <= 0.85:
-            s += 3
-        elif 0.50 <= profit < 0.60:
-            s += 2
-        elif profit > 0.90:
-            s += 1
-        elif profit < 0.30:
-            s -= 1
+    if 0.60 <= profit <= 0.85:
+        s += 3
+    elif 0.50 <= profit < 0.60:
+        s += 2
+    elif profit > 0.90:
+        s += 1
+    elif profit < 0.30:
+        s -= 1
 
-        if conc < 0.15:
-            s += 3
-        elif conc < 0.25:
-            s += 2
-        elif conc < 0.35:
-            s += 1
+    if conc < 0.15:
+        s += 3
+    elif conc < 0.25:
+        s += 2
+    elif conc < 0.35:
+        s += 1
+    if above <= HARD_MAX_ABOVE_CHIP:
+        s += 1
 
     raw["筹码分布"] = max(min(s, 10), 0)
+
+    # ---- 10. 相对低位 (原始分 0~10) ----
+    s = 0.0
+    if 0.18 <= rel_pos <= 0.40:
+        s = 10
+    elif 0.10 <= rel_pos < 0.18:
+        s = 8
+    elif 0.40 < rel_pos <= 0.50:
+        s = 8
+    elif rel_pos < 0.10:
+        s = 4
+    elif 0.50 < rel_pos <= 0.60:
+        s = 5
+    else:
+        s = 2
+    if HARD_MIN_REL_POS <= rel_pos <= HARD_MAX_REL_POS:
+        s += 1
+    raw["相对低位"] = max(min(s, 10), 0)
 
     # ---- 加权总分 (满分 100) ----
     weighted_total = sum(
@@ -231,12 +334,17 @@ def calc_exit_points(df: pd.DataFrame) -> dict | None:
     """
     综合 ATR、支撑阻力位、布林带 三种方法预测止盈止损点。
 
-    止损逻辑：取 ATR 止损、近期支撑、布林下轨 中的最高值（最保守）
+    止损逻辑：
+      1) 按趋势强弱自适应 ATR 倍数（强趋势更宽，弱趋势更紧）
+      2) 与近期支撑、布林下轨取最保守值
+      3) 再套用最小/最大止损幅度保护带
     止盈逻辑：分两档
       T1（短线）：ATR 1.5 倍目标 与 布林中轨 的较高者
       T2（波段）：ATR 3.0 倍目标 与 布林上轨 / 近期阻力 的较高者
 
-    Returns dict: 止损价, 止盈1, 止盈2, 止损幅度%, 止盈1幅度%, 止盈2幅度%
+    并额外给出：触发止盈①后的移动止损建议（成本+缓冲 / MA10 / ATR 跟踪）
+
+    Returns dict: 止损价, 止盈1, 止盈2, 止损幅度%, 止盈1幅度%, 止盈2幅度% 等
     """
     if df is None or len(df) < 20:
         return None
@@ -255,6 +363,19 @@ def calc_exit_points(df: pd.DataFrame) -> dict | None:
     if np.isnan(atr_val) or atr_val <= 0:
         atr_val = price * 0.03
 
+    # --- 趋势强弱（用于自适应 ATR 止损倍数） ---
+    ts = calc_trend_stability(close, 20)
+    sl_atr_mult = EXIT_ATR_MULT_BASE
+    if ts is not None:
+        r2 = ts["r_squared"]
+        up = ts["slope"] > 0
+        if up and r2 >= EXIT_TREND_R2_STRONG:
+            sl_atr_mult = EXIT_ATR_MULT_STRONG
+        elif up and r2 >= EXIT_TREND_R2_WEAK:
+            sl_atr_mult = EXIT_ATR_MULT_BASE
+        else:
+            sl_atr_mult = EXIT_ATR_MULT_WEAK
+
     # --- 支撑与阻力 ---
     lookback = min(20, len(df))
     recent_low = low.iloc[-lookback:].min()
@@ -267,26 +388,40 @@ def calc_exit_points(df: pd.DataFrame) -> dict | None:
     boll_lower = lower.iloc[-1] if not np.isnan(lower.iloc[-1]) else price * 0.94
 
     # --- 止损：取三种方法中最保守的（最高值，离现价最近） ---
-    sl_atr = price - 2.0 * atr_val
+    sl_atr = price - sl_atr_mult * atr_val
     sl_support = recent_low * 0.99
     sl_boll = boll_lower
 
-    stop_loss = round(max(sl_atr, sl_support, sl_boll), 2)
-    # 止损不能高于现价
+    stop_loss_raw = max(sl_atr, sl_support, sl_boll)
+    # 止损保护带：限制在 [最大回撤, 最小回撤] 区间内
+    min_stop_price = price * (1 - EXIT_MAX_STOP_PCT / 100)   # 最低允许（最远）
+    max_stop_price = price * (1 - EXIT_MIN_STOP_PCT / 100)   # 最高允许（最近）
+    stop_loss = min(max(stop_loss_raw, min_stop_price), max_stop_price)
+    # 兜底
     if stop_loss >= price:
-        stop_loss = round(price * 0.95, 2)
+        stop_loss = price * (1 - EXIT_MIN_STOP_PCT / 100)
+    stop_loss = round(stop_loss, 2)
 
     # --- 止盈 T1（短线目标）---
-    tp1_atr = price + 1.5 * atr_val
+    tp1_atr = price + EXIT_TP1_ATR_MULT * atr_val
     tp1 = round(max(tp1_atr, boll_mid), 2)
     if tp1 <= price:
         tp1 = round(price * 1.03, 2)
 
     # --- 止盈 T2（波段目标）---
-    tp2_atr = price + 3.0 * atr_val
+    tp2_atr = price + EXIT_TP2_ATR_MULT * atr_val
     tp2 = round(max(tp2_atr, boll_upper, recent_high), 2)
     if tp2 <= tp1:
         tp2 = round(tp1 * 1.03, 2)
+
+    # --- 移动止损建议（触发止盈①后执行） ---
+    ma10 = calc_ma(close, 10).iloc[-1]
+    trail_from_ma = ma10 if not np.isnan(ma10) else price
+    trail_from_atr = price + EXIT_TRAIL_BUFFER_ATR * atr_val
+    trail_from_follow = price - EXIT_TRAIL_ATR_MULT * atr_val
+    trail_stop = round(max(trail_from_ma, trail_from_atr, trail_from_follow), 2)
+    if trail_stop > tp1:
+        trail_stop = round(tp1, 2)
 
     return {
         "止损价": stop_loss,
@@ -295,6 +430,10 @@ def calc_exit_points(df: pd.DataFrame) -> dict | None:
         "止损%": round((stop_loss / price - 1) * 100, 1),
         "止盈1%": round((tp1 / price - 1) * 100, 1),
         "止盈2%": round((tp2 / price - 1) * 100, 1),
+        "移动止损触发价": tp1,
+        "移动止损价": trail_stop,
+        "移动止损%": round((trail_stop / price - 1) * 100, 1),
+        "ATR止损系数": round(sl_atr_mult, 2),
     }
 
 
@@ -320,10 +459,12 @@ def score_stock_round2(df: pd.DataFrame, exit_points: dict | None) -> dict | Non
     # ---- 1. 风险收益比 (0~10) ----
     s = 5.0
     if exit_points:
-        tp_pct = abs(exit_points.get("止盈1%", 0))
+        tp1_pct = abs(exit_points.get("止盈1%", 0))
+        tp2_pct = abs(exit_points.get("止盈2%", tp1_pct))
         sl_pct = abs(exit_points.get("止损%", 0))
         if sl_pct > 0:
-            ratio = tp_pct / sl_pct
+            tp_mix_pct = EXIT_RR_TP1_WEIGHT * tp1_pct + EXIT_RR_TP2_WEIGHT * tp2_pct
+            ratio = tp_mix_pct / sl_pct
             if ratio >= 3.0:
                 s = 10
             elif ratio >= 2.5:

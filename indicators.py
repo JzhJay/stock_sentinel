@@ -210,3 +210,24 @@ def calc_volume_trend(volume: pd.Series, period: int = 5) -> dict | None:
     coeffs = polyfit(x, recent_vol, deg=1)
     slope = coeffs[1]
     return {"above_ma_days": above_count, "vol_slope": slope}
+
+
+def calc_relative_position(close: pd.Series, period: int = 120) -> float | None:
+    """
+    横向相对位置（0~1）：
+      0   = 位于周期最低点
+      1   = 位于周期最高点
+    """
+    if close is None or len(close) < 2:
+        return None
+
+    window = close.astype(float).iloc[-period:] if len(close) >= period else close.astype(float)
+    low = window.min()
+    high = window.max()
+    last = window.iloc[-1]
+
+    if np.isnan(low) or np.isnan(high) or np.isnan(last):
+        return None
+    if high <= low:
+        return 0.5
+    return float((last - low) / (high - low))

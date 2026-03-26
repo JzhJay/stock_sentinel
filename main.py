@@ -17,7 +17,10 @@ import datetime
 import pandas as pd
 import baostock as bs
 
-from config import TOP_N, FINAL_TOP, MIN_PRICE, MAX_PRICE, ROUND2_WEIGHTS
+from config import (
+    TOP_N, FINAL_TOP, MIN_PRICE, MAX_PRICE, ROUND2_WEIGHTS,
+    EXIT_TP1_ATR_MULT, EXIT_TP2_ATR_MULT,
+)
 from data import get_all_stocks, filter_stocks, pre_screen, get_stock_history
 from scoring import score_stock, calc_exit_points, score_stock_round2
 
@@ -30,7 +33,7 @@ def print_header():
     print("=" * 70)
     print(f"  运行时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  数据来源: 新浪财经(实时行情) + baostock(历史K线)")
-    print(f"  评分体系: 9 维度加权评分（满分 100）+ 5 维度精选（满分 50）")
+    print(f"  评分体系: 10 维度加权评分（无硬门槛淘汰，满分 100）+ 5 维度精选（满分 50）")
     print(f"  价格区间: {MIN_PRICE} ~ {MAX_PRICE} 元")
     print(f"  推荐数量: 初选 {TOP_N} 只 → 精选 {FINAL_TOP} 只")
     print("=" * 70)
@@ -42,8 +45,8 @@ def print_results(result_df):
 
     print(f"\n{'排名':>4}  {'代码':<8} {'名称':<8} {'最新价':>7} {'涨幅%':>6} "
           f"{'总分':>6} {'均线':>4} {'MACD':>4} {'量':>4} {'RSI':>4} "
-          f"{'KDJ':>4} {'布林':>4} {'动量':>4} {'换手':>4} {'筹码':>4}")
-    print("-" * 100)
+          f"{'KDJ':>4} {'布林':>4} {'动量':>4} {'换手':>4} {'筹码':>4} {'低位':>4}")
+    print("-" * 108)
 
     for rank, (_, r) in enumerate(top.iterrows(), 1):
         print(f"{rank:>4}  {r['代码']:<8} {r['名称']:<8} "
@@ -51,7 +54,7 @@ def print_results(result_df):
               f"{r['总分']:>6.1f} {r['均线趋势']:>4.0f} {r['MACD']:>4.0f} "
               f"{r['成交量']:>4.0f} {r['RSI']:>4.0f} "
               f"{r['KDJ']:>4.0f} {r['布林带']:>4.0f} {r['动量']:>4.0f} {r['换手率']:>4.0f} "
-              f"{r['筹码分布']:>4.0f}")
+              f"{r['筹码分布']:>4.0f} {r.get('相对低位', 0):>4.0f}")
 
     # ---------- 止盈止损 ----------
     print("\n" + "=" * 70)
@@ -60,8 +63,9 @@ def print_results(result_df):
     print(f"\n{'排名':>4}  {'代码':<8} {'名称':<8} {'最新价':>7}"
           f"  {'止损':>7} {'止损%':>6}"
           f"  {'止盈①':>7} {'幅度%':>6}"
-          f"  {'止盈②':>7} {'幅度%':>6}")
-    print("-" * 90)
+          f"  {'止盈②':>7} {'幅度%':>6}"
+          f"  {'移损':>7} {'移损%':>6}")
+    print("-" * 110)
 
     for rank, (_, r) in enumerate(top.iterrows(), 1):
         sl = r.get("止损价")
@@ -71,11 +75,13 @@ def print_results(result_df):
             print(f"{rank:>4}  {r['代码']:<8} {r['名称']:<8} {r['最新价']:>7.2f}"
                   f"  {sl:>7.2f} {r['止损%']:>+5.1f}%"
                   f"  {tp1:>7.2f} {r['止盈1%']:>+5.1f}%"
-                  f"  {tp2:>7.2f} {r['止盈2%']:>+5.1f}%")
+                  f"  {tp2:>7.2f} {r['止盈2%']:>+5.1f}%"
+                  f"  {r.get('移动止损价', 0):>7.2f} {r.get('移动止损%', 0):>+5.1f}%")
 
-    print(f"\n  📌 止损：基于 ATR 波动率 + 近期支撑位 + 布林下轨（取最保守值）")
-    print(f"  📌 止盈①：短线目标（ATR 1.5倍 / 布林中轨）")
-    print(f"  📌 止盈②：波段目标（ATR 3倍 / 布林上轨 / 近期阻力位）")
+    print(f"\n  📌 止损：自适应 ATR 倍数 + 支撑位 + 布林下轨，并限制最小/最大止损幅度")
+    print(f"  📌 止盈①：短线目标（ATR {EXIT_TP1_ATR_MULT:.1f}倍 / 布林中轨）")
+    print(f"  📌 止盈②：波段目标（ATR {EXIT_TP2_ATR_MULT:.1f}倍 / 布林上轨 / 近期阻力位）")
+    print(f"  📌 移动止损：触发止盈①后，上移到 成本+缓冲 / MA10 / ATR跟踪 的更高值")
 
     # ---------- 详细分析 ----------
     print("\n" + "=" * 70)
@@ -89,6 +95,7 @@ def print_results(result_df):
         ("KDJ",      6, "✅ KDJ金叉信号",    None, None),
         ("动量",     7, "✅ 近期涨势良好",    None, None),
         ("筹码分布", 7, "✅ 上方筹码稀疏",    4,   "🔶 筹码结构尚可"),
+        ("相对低位", 7, "✅ 横向相对低位",    4,   "🔶 位置尚可"),
     ]
 
     for rank, (_, r) in enumerate(top.iterrows(), 1):
@@ -108,7 +115,9 @@ def print_results(result_df):
         if sl is not None:
             print(f"    💰 建议止损: {sl:.2f}({r['止损%']:+.1f}%)  "
                   f"止盈①: {r['止盈1']:.2f}({r['止盈1%']:+.1f}%)  "
-                  f"止盈②: {r['止盈2']:.2f}({r['止盈2%']:+.1f}%)")
+                  f"止盈②: {r['止盈2']:.2f}({r['止盈2%']:+.1f}%)  "
+                  f"移损触发: {r.get('移动止损触发价', 0):.2f}  "
+                  f"移损价: {r.get('移动止损价', 0):.2f}({r.get('移动止损%', 0):+.1f}%)")
 
 
 def print_round2(top_df):
@@ -137,12 +146,14 @@ def print_final(final_df):
         if sl is not None:
             print(f"    止损: {sl:.2f}({r['止损%']:+.1f}%)  "
                   f"止盈①: {r['止盈1']:.2f}({r['止盈1%']:+.1f}%)  "
-                  f"止盈②: {r['止盈2']:.2f}({r['止盈2%']:+.1f}%)")
+                  f"止盈②: {r['止盈2']:.2f}({r['止盈2%']:+.1f}%)  "
+                  f"移损价: {r.get('移动止损价', 0):.2f}({r.get('移动止损%', 0):+.1f}%)")
 
         tags = []
         tag_rules = [
             ("均线趋势", 8, "均线多头"), ("MACD", 8, "MACD金叉"),
             ("成交量", 8, "量价配合"), ("KDJ", 6, "KDJ金叉"),
+            ("相对低位", 7, "相对低位"),
             ("R2_趋势稳定性", 8, "趋势平滑"), ("R2_多周期共振", 7, "多周期共振"),
             ("R2_量能持续性", 8, "持续放量"), ("R2_风险收益比", 8, "高性价比"),
         ]
@@ -162,6 +173,7 @@ def _build_signal_text(row) -> str:
         ("KDJ", 6, "KDJ金叉", None, None),
         ("动量", 7, "涨势良好", None, None),
         ("筹码分布", 7, "上方筹码稀疏", 4, "筹码尚可"),
+        ("相对低位", 7, "横向相对低位", 4, "位置尚可"),
     ]
     tags = []
     for col, th_hi, lbl_hi, th_lo, lbl_lo in tag_rules:
@@ -177,7 +189,7 @@ def save_csv(result_df, final_df=None):
     os.makedirs("output", exist_ok=True)
     date_str = datetime.date.today().strftime("%Y%m%d")
 
-    dim_cols = ["均线趋势", "MACD", "成交量", "筹码分布", "动量",
+    dim_cols = ["均线趋势", "MACD", "成交量", "筹码分布", "相对低位", "动量",
                 "布林带", "RSI", "KDJ", "换手率"]
     r2_cols = ["R2_风险收益比", "R2_趋势稳定性", "R2_乖离率", "R2_量能持续性", "R2_多周期共振"]
 
@@ -189,13 +201,14 @@ def save_csv(result_df, final_df=None):
     fname10 = os.path.join("output", f"stock_picks_{date_str}.csv")
     out10 = result_df.head(TOP_N).copy()
     out10.insert(0, "排名", range(1, len(out10) + 1))
-    for c in ["止损%", "止盈1%", "止盈2%"]:
+    for c in ["止损%", "止盈1%", "止盈2%", "移动止损%"]:
         _fmt_pct(c, out10)
     out10["信号摘要"] = out10.apply(_build_signal_text, axis=1)
 
     col_order_10 = [
         "排名", "代码", "名称", "总分", "最新价", "涨跌幅%",
         "止损价", "止损%", "止盈1", "止盈1%", "止盈2", "止盈2%",
+        "移动止损触发价", "移动止损价", "移动止损%", "ATR止损系数",
         "信号摘要",
     ] + dim_cols
     out10 = out10[[c for c in col_order_10 if c in out10.columns]]
@@ -207,7 +220,7 @@ def save_csv(result_df, final_df=None):
         fname3 = os.path.join("output", f"stock_final_{date_str}.csv")
         out3 = final_df.head(FINAL_TOP).copy()
         out3.insert(0, "排名", range(1, len(out3) + 1))
-        for c in ["止损%", "止盈1%", "止盈2%"]:
+        for c in ["止损%", "止盈1%", "止盈2%", "移动止损%"]:
             _fmt_pct(c, out3)
         out3["信号摘要"] = out3.apply(_build_signal_text, axis=1)
 
@@ -215,6 +228,7 @@ def save_csv(result_df, final_df=None):
             "排名", "代码", "名称", "综合分", "总分", "精选分",
             "最新价", "涨跌幅%",
             "止损价", "止损%", "止盈1", "止盈1%", "止盈2", "止盈2%",
+            "移动止损触发价", "移动止损价", "移动止损%", "ATR止损系数",
             "信号摘要",
         ] + r2_cols + dim_cols
         out3 = out3[[c for c in col_order_3 if c in out3.columns]]
