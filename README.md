@@ -495,13 +495,6 @@ python main.py
 | `RETRY_TIMES` | 2 | 网络请求重试次数 |
 | `PRE_SCREEN_TOP` | 200 | 预筛选保留候选数量 |
 | `SINA_BATCH_SIZE` | 800 | 新浪行情每批请求股票数 |
-| `MA_TREND_LOOKBACK` | 3 | 均线趋势/发散评分回看天数 |
-| `HARD_MAX_ABOVE_CHIP` | 0.45 | 上方筹码“偏好阈值”（满足有额外加分） |
-| `HARD_MIN_REL_POS` / `HARD_MAX_REL_POS` | 0.08 / 0.75 | 相对低位“偏好区间”（满足有额外加分） |
-| `HARD_REQUIRE_MA60_RISING` | False | 均线趋势评分细化参数（不用于硬淘汰） |
-| `HARD_MIN_RISING_MA_COUNT` | 3 | 均线趋势评分细化参数（不用于硬淘汰） |
-| `HARD_MIN_SPREAD_WIDEN_COUNT` | 1 | 均线趋势评分细化参数（不用于硬淘汰） |
-| `HARD_MA_EPS` | 0.0 | 均线比较容差（元） |
 | `EXIT_ATR_MULT_STRONG / BASE / WEAK` | 2.8 / 2.0 / 1.6 | 趋势自适应 ATR 止损倍数 |
 | `EXIT_MIN_STOP_PCT / EXIT_MAX_STOP_PCT` | 3 / 12 | 止损幅度保护带（%） |
 | `EXIT_TP1_ATR_MULT / EXIT_TP2_ATR_MULT` | 1.5 / 3.0 | 两档止盈 ATR 倍数 |
@@ -551,7 +544,7 @@ python main.py
 - 代码已在 `config.py` 设置 `NO_PROXY=*`，用于避免系统代理导致行情请求失败；如你依赖代理访问，请按实际网络环境调整。
 - `get_all_stocks()` 会向前回退最多 7 天寻找最近交易日股票列表，非交易日运行通常仍可得到结果。
 - 若出现“过滤后没有符合条件的股票”，优先检查：是否处于极端行情日、`MIN_PRICE/MAX_PRICE` 是否过窄、或网络返回数据是否不完整。
-- 当前版本不做硬门槛淘汰；若结果不理想，优先通过 `SCORE_WEIGHTS` 与上述偏好阈值调参来改变排序结果。
+- 当前版本不做硬门槛淘汰；若结果不理想，优先通过 `SCORE_WEIGHTS` 调整排序侧重点。
 
 ## 已知限制与优化方向
 
