@@ -431,6 +431,7 @@ stock_sentinel/
 ├── data.py            # 数据获取（baostock 股票列表/历史K线 + 新浪实时行情）
 ├── indicators.py      # 技术指标计算（MA/MACD/RSI/KDJ/布林带/筹码分布/ATR/乖离率等）
 ├── scoring.py         # 两轮评分 + 止盈止损预测
+├── trend_predict.py   # 推荐后趋势预测（P_up_5 / P_dd_5 / P_up_10 + 动作建议）
 ├── test.py            # 早期单文件版本（对照/实验用途）
 ├── requirements.txt   # Python 依赖
 ├── output/            # CSV 输出目录（自动创建）
@@ -483,6 +484,21 @@ python main.py
 - `stock_picks_YYYYMMDD.csv` — 初选 Top-10
 - `stock_final_YYYYMMDD.csv` — 精选 Top-3（含综合分和精选维度明细）
 
+### 4. 对近几日推荐股做趋势预测
+
+```bash
+python trend_predict.py --days 5 --source final --top-per-day 3
+```
+
+可选参数：
+- `--days`：回看最近多少自然日的推荐文件（默认 5）
+- `--source`：`final` 或 `picks`（默认 `final`）
+- `--top-per-day`：每个推荐日纳入的股票数量（默认 3）
+- `--output`：自定义输出 CSV 路径
+
+输出文件（默认）：
+- `output/trend_forecast_YYYYMMDD.csv` — 推荐后趋势预测结果（含概率与动作建议）
+
 ## 配置说明
 
 编辑 `config.py` 可调整以下参数：
@@ -494,14 +510,8 @@ python main.py
 | `HISTORY_DAYS` | 120 | 历史 K 线天数 |
 | `RETRY_TIMES` | 2 | 网络请求重试次数 |
 | `PRE_SCREEN_TOP` | 200 | 预筛选保留候选数量 |
+| `MAX_WORKERS` | 8 | 历史 K 线拉取与评分并发线程数（提速关键参数） |
 | `SINA_BATCH_SIZE` | 800 | 新浪行情每批请求股票数 |
-| `MA_TREND_LOOKBACK` | 3 | 均线趋势/发散评分回看天数 |
-| `HARD_MAX_ABOVE_CHIP` | 0.45 | 上方筹码“偏好阈值”（满足有额外加分） |
-| `HARD_MIN_REL_POS` / `HARD_MAX_REL_POS` | 0.08 / 0.75 | 相对低位“偏好区间”（满足有额外加分） |
-| `HARD_REQUIRE_MA60_RISING` | False | 均线趋势评分细化参数（不用于硬淘汰） |
-| `HARD_MIN_RISING_MA_COUNT` | 3 | 均线趋势评分细化参数（不用于硬淘汰） |
-| `HARD_MIN_SPREAD_WIDEN_COUNT` | 1 | 均线趋势评分细化参数（不用于硬淘汰） |
-| `HARD_MA_EPS` | 0.0 | 均线比较容差（元） |
 | `EXIT_ATR_MULT_STRONG / BASE / WEAK` | 2.8 / 2.0 / 1.6 | 趋势自适应 ATR 止损倍数 |
 | `EXIT_MIN_STOP_PCT / EXIT_MAX_STOP_PCT` | 3 / 12 | 止损幅度保护带（%） |
 | `EXIT_TP1_ATR_MULT / EXIT_TP2_ATR_MULT` | 1.5 / 3.0 | 两档止盈 ATR 倍数 |
@@ -535,7 +545,13 @@ python main.py
 
 ## 输出文件字段说明
 
-程序默认输出两份文件（`output/stock_picks_YYYYMMDD.csv`、`output/stock_final_YYYYMMDD.csv`），核心字段如下：
+程序默认输出三类文件：
+
+- `output/stock_picks_YYYYMMDD.csv`：初选结果
+- `output/stock_final_YYYYMMDD.csv`：精选结果
+- `output/trend_forecast_YYYYMMDD.csv`：推荐后趋势预测结果
+
+核心字段说明（选股结果）如下：
 
 - `总分`：第一轮 10 维度加权分（满分 100）
 - `精选分`：第二轮 5 维度加权分（满分 50，仅 final 文件）
@@ -551,11 +567,11 @@ python main.py
 - 代码已在 `config.py` 设置 `NO_PROXY=*`，用于避免系统代理导致行情请求失败；如你依赖代理访问，请按实际网络环境调整。
 - `get_all_stocks()` 会向前回退最多 7 天寻找最近交易日股票列表，非交易日运行通常仍可得到结果。
 - 若出现“过滤后没有符合条件的股票”，优先检查：是否处于极端行情日、`MIN_PRICE/MAX_PRICE` 是否过窄、或网络返回数据是否不完整。
-- 当前版本不做硬门槛淘汰；若结果不理想，优先通过 `SCORE_WEIGHTS` 与上述偏好阈值调参来改变排序结果。
+- 当前版本不做硬门槛淘汰；若结果不理想，优先通过 `SCORE_WEIGHTS` 调整排序侧重点。
 
 ## 已知限制与优化方向
 
-- `fetch_and_score()` 当前按股票逐只串行拉取历史 K 线，`MAX_WORKERS` 尚未在主流程启用；大样本场景可考虑引入并发抓取。
+- `fetch_and_score()` 已启用并发抓取与评分；若本机网络或数据源不稳定，可将 `MAX_WORKERS` 下调到 2~4，或设为 1 切回串行模式。
 - 移动止损为“触发后执行”的规则提示，当前脚本仍是单次离线计算，不会自动做盘中动态更新。
 
 ## 免责声明

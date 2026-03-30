@@ -13,12 +13,13 @@ warnings.filterwarnings("ignore")
 
 import sys
 import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import baostock as bs
 
 from config import (
-    TOP_N, FINAL_TOP, MIN_PRICE, MAX_PRICE, ROUND2_WEIGHTS,
+    TOP_N, FINAL_TOP, MIN_PRICE, MAX_PRICE, ROUND2_WEIGHTS, MAX_WORKERS,
     EXIT_TP1_ATR_MULT, EXIT_TP2_ATR_MULT,
 )
 from data import get_all_stocks, filter_stocks, pre_screen, get_stock_history
@@ -258,45 +259,72 @@ def fetch_and_score(candidates):
     total = len(candidates)
 
     print(f"\n📈 正在获取候选股票历史 K 线并评分（共 {total} 只）...")
-    print("   这可能需要几分钟，请耐心等待...\n")
+    workers = max(1, int(MAX_WORKERS))
+    print(f"   使用并发线程数: {workers}\n")
 
-    for _, row in candidates.iterrows():
-        bs_code = str(row["bs_code"])
-        name = str(row["名称"])
+    def _process_one(bs_code: str, name: str):
+        code, stock_name, hist_df = get_stock_history(bs_code, name)
+        if hist_df is None or len(hist_df) < 60:
+            return {"status": "fail", "msg": f"   ⚠️ K线不足 {code} {stock_name} (跳过)"}
 
-        code, name, hist_df = get_stock_history(bs_code, name)
-        completed += 1
+        try:
+            score = score_stock(hist_df)
+            if not score or score.get("总分", 0) <= 0:
+                return {"status": "skip"}
 
-        if hist_df is not None and len(hist_df) >= 60:
-            try:
-                score = score_stock(hist_df)
-                if score and score["总分"] > 0:
-                    close = hist_df["收盘"].astype(float)
-                    entry = {
-                        "代码": code,
-                        "名称": name,
-                        "最新价": round(close.iloc[-1], 2),
-                        "涨跌幅%": round(
-                            (close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100, 2
-                        ),
-                        **score,
-                    }
-                    exits = calc_exit_points(hist_df)
-                    if exits:
-                        entry.update(exits)
-                    results.append(entry)
-                    hist_cache[code] = hist_df
-            except Exception as e:
+            close = hist_df["收盘"].astype(float)
+            entry = {
+                "代码": code,
+                "名称": stock_name,
+                "最新价": round(close.iloc[-1], 2),
+                "涨跌幅%": round(
+                    (close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100, 2
+                ),
+                **score,
+            }
+            exits = calc_exit_points(hist_df)
+            if exits:
+                entry.update(exits)
+            return {"status": "ok", "code": code, "hist_df": hist_df, "entry": entry}
+        except Exception as e:
+            return {"status": "fail", "msg": f"   ⚠️ 评分异常 {code} {stock_name}: {e}"}
+
+    items = [(str(bs_code), str(name)) for bs_code, name in candidates[["bs_code", "名称"]].itertuples(index=False, name=None)]
+
+    if workers == 1:
+        for bs_code, name in items:
+            ret = _process_one(bs_code, name)
+            completed += 1
+            if ret["status"] == "ok":
+                code = ret["code"]
+                results.append(ret["entry"])
+                hist_cache[code] = ret["hist_df"]
+            elif ret["status"] == "fail":
                 failed += 1
-                print(f"   ⚠️ 评分异常 {code} {name}: {e}")
-        else:
-            failed += 1
-            print(f"   ⚠️ K线不足 {code} {name} (跳过)")
+                print(ret["msg"])
 
-        if completed % 20 == 0 or completed == total:
-            pct = completed / total * 100
-            print(f"   进度: {completed}/{total} ({pct:.0f}%)  "
-                  f"有效: {len(results)}  失败: {failed}")
+            if completed % 20 == 0 or completed == total:
+                pct = completed / total * 100
+                print(f"   进度: {completed}/{total} ({pct:.0f}%)  "
+                      f"有效: {len(results)}  失败: {failed}")
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(_process_one, bs_code, name) for bs_code, name in items]
+            for fut in as_completed(futures):
+                ret = fut.result()
+                completed += 1
+                if ret["status"] == "ok":
+                    code = ret["code"]
+                    results.append(ret["entry"])
+                    hist_cache[code] = ret["hist_df"]
+                elif ret["status"] == "fail":
+                    failed += 1
+                    print(ret["msg"])
+
+                if completed % 20 == 0 or completed == total:
+                    pct = completed / total * 100
+                    print(f"   进度: {completed}/{total} ({pct:.0f}%)  "
+                          f"有效: {len(results)}  失败: {failed}")
 
     return results, hist_cache
 

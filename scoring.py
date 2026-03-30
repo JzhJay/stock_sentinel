@@ -11,10 +11,6 @@ import pandas as pd
 
 from config import (
     SCORE_WEIGHTS, ROUND2_WEIGHTS,
-    MA_TREND_LOOKBACK, HARD_MAX_ABOVE_CHIP,
-    HARD_MIN_REL_POS, HARD_MAX_REL_POS,
-    HARD_REQUIRE_MA60_RISING, HARD_MIN_RISING_MA_COUNT,
-    HARD_MIN_SPREAD_WIDEN_COUNT, HARD_MA_EPS,
     EXIT_ATR_MULT_STRONG, EXIT_ATR_MULT_BASE, EXIT_ATR_MULT_WEAK,
     EXIT_TREND_R2_STRONG, EXIT_TREND_R2_WEAK,
     EXIT_MIN_STOP_PCT, EXIT_MAX_STOP_PCT,
@@ -50,7 +46,12 @@ def score_stock(df: pd.DataFrame) -> dict | None:
     ma60 = calc_ma(close, 60)
 
     # ---- 偏好条件计算（用于加分，不做硬淘汰） ----
-    lb = max(1, int(MA_TREND_LOOKBACK))
+    # 规则固定在代码中，避免过多配置项增加复杂度。
+    lb = 3
+    eps = 0.0
+    above_chip_bonus_th = 0.45
+    rel_pos_bonus_min, rel_pos_bonus_max = 0.08, 0.75
+
     if latest - lb < 0:
         return None
 
@@ -60,24 +61,14 @@ def score_stock(df: pd.DataFrame) -> dict | None:
 
     price = close.iloc[latest]
     ma_bull = (price > ma5.iloc[latest] > ma10.iloc[latest] > ma20.iloc[latest] > ma60.iloc[latest])
-    eps = float(HARD_MA_EPS)
     rising_5 = ma5.iloc[latest] > ma5.iloc[latest - lb] + eps
     rising_10 = ma10.iloc[latest] > ma10.iloc[latest - lb] + eps
     rising_20 = ma20.iloc[latest] > ma20.iloc[latest - lb] + eps
     rising_60 = ma60.iloc[latest] > ma60.iloc[latest - lb] + eps
     rising_count = int(rising_5) + int(rising_10) + int(rising_20) + int(rising_60)
 
-    # 默认要求短中期三条均线上行；MA60 是否强制由配置控制
-    if HARD_REQUIRE_MA60_RISING:
-        ma_rising = (
-            rising_5 and rising_10 and rising_20 and rising_60
-            and rising_count >= int(HARD_MIN_RISING_MA_COUNT)
-        )
-    else:
-        ma_rising = (
-            rising_5 and rising_10 and rising_20
-            and rising_count >= int(HARD_MIN_RISING_MA_COUNT)
-        )
+    # 偏好：短中期三条均线向上，同时四条里至少三条上行
+    ma_rising = rising_5 and rising_10 and rising_20 and rising_count >= 3
 
     spread_now = [
         ma5.iloc[latest] - ma10.iloc[latest],
@@ -92,7 +83,7 @@ def score_stock(df: pd.DataFrame) -> dict | None:
     spread_pos = all(s > 0 for s in spread_now)
     spread_widen_count = sum(1 for n, o in zip(spread_now, spread_old) if n > o + eps)
     spread_non_shrink_count = sum(1 for n, o in zip(spread_now, spread_old) if n >= o - eps)
-    min_widen = max(0, int(HARD_MIN_SPREAD_WIDEN_COUNT))
+    min_widen = 1
     ma_diverging = spread_pos and (
         spread_widen_count >= min_widen
         or spread_non_shrink_count == 3
@@ -295,7 +286,7 @@ def score_stock(df: pd.DataFrame) -> dict | None:
         s += 2
     elif conc < 0.35:
         s += 1
-    if above <= HARD_MAX_ABOVE_CHIP:
+    if above <= above_chip_bonus_th:
         s += 1
 
     raw["筹码分布"] = max(min(s, 10), 0)
@@ -314,7 +305,7 @@ def score_stock(df: pd.DataFrame) -> dict | None:
         s = 5
     else:
         s = 2
-    if HARD_MIN_REL_POS <= rel_pos <= HARD_MAX_REL_POS:
+    if rel_pos_bonus_min <= rel_pos <= rel_pos_bonus_max:
         s += 1
     raw["相对低位"] = max(min(s, 10), 0)
 
